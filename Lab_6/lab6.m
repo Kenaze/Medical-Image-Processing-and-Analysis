@@ -1,6 +1,6 @@
 %% Лабораторная работа № 6
 % Регистрация изображений: нахождение поворота и масштаба.
-% MATLAB R2024a; Image Processing Toolbox + Computer Vision Toolbox.
+% MATLAB R2024a; Image Processing Toolbox (Computer Vision Toolbox optional).
 % Скрипт предназначен для запуска через make_report('lab6.m').
 clc;
 clear;
@@ -54,34 +54,97 @@ fprintf('Размер после искажения: %d x %d пикселей.\n
 % автоматический запуск универсального генератора отчётов.
 % При этом соответствия ищутся на ИЗОБРАЖЕНИЯХ, а не вычисляются
 % заранее по известным scaleFactor и theta.
-pointsMoving = detectSIFTFeatures(distorted,'ContrastThreshold',0.005);
-pointsFixed  = detectSIFTFeatures(original,'ContrastThreshold',0.005);
-[featuresMoving, validMoving] = extractFeatures(distorted,pointsMoving);
-[featuresFixed,  validFixed]  = extractFeatures(original,pointsFixed);
-pairs = matchFeatures(featuresMoving,featuresFixed, ...
-    'Unique',true,'MaxRatio',0.85,'MatchThreshold',80);
-
-if size(pairs,1) < 10
-    error(['Найдено только %d сопоставлений (нужно >= 10). ' ...
-        'Попробуйте более текстурированное изображение.'],size(pairs,1));
-end
-movingMatched = validMoving(pairs(:,1)).Location;
-fixedMatched  = validFixed(pairs(:,2)).Location;
-
-% MSAC/RANSAC удаляет ложные соответствия до вызова fitgeotform2d.
-[~, inlierIndex] = estgeotform2d(movingMatched,fixedMatched, ...
-    'similarity','MaxDistance',3,'MaxNumTrials',5000,'Confidence',99.9);
-movingInliers = movingMatched(inlierIndex,:);
-fixedInliers  = fixedMatched(inlierIndex,:);
-if size(movingInliers,1) < 10
-    error(['После исключения ложных соответствий осталось %d пар (нужно >= 10). ' ...
-        'Выберите другой снимок с различимыми деталями.'],size(movingInliers,1));
-end
-
-% Равномерное покрытие изображения: выбираем наиболее удалённые пары.
-% Первые 5 точек входят в набор из 10, поэтому сравнение корректно.
+% Если Computer Vision Toolbox установлен, используются реальные SIFT-пары.
+% Иначе используется моделирование контрольных точек с погрешностью
+% локализации. Этот второй режим НЕ является независимым поиском совпадений:
+% он предназначен для демонстрации fitgeotform2d без Computer Vision Toolbox.
 numPairsSmall = 5;
 numPairsLarge = 10;
+useSIFT = exist('detectSIFTFeatures','file') == 2 && ...
+          exist('extractFeatures','file') == 2 && ...
+          exist('matchFeatures','file') == 2 && ...
+          exist('estgeotform2d','file') == 2;
+usedSIFT = false;
+
+if useSIFT
+    try
+        pointsMoving = detectSIFTFeatures(distorted,'ContrastThreshold',0.005);
+        pointsFixed = detectSIFTFeatures(original,'ContrastThreshold',0.005);
+        [featuresMoving, validMoving] = extractFeatures(distorted,pointsMoving);
+        [featuresFixed, validFixed] = extractFeatures(original,pointsFixed);
+        pairs = matchFeatures(featuresMoving,featuresFixed, ...
+            'Unique',true,'MaxRatio',0.85,'MatchThreshold',80);
+        if size(pairs,1) >= numPairsLarge
+            movingMatched = validMoving(pairs(:,1)).Location;
+            fixedMatched = validFixed(pairs(:,2)).Location;
+            [~, inlierIndex] = estgeotform2d(movingMatched,fixedMatched, ...
+                'similarity','MaxDistance',3,'MaxNumTrials',5000, ...
+                'Confidence',99.9);
+            movingInliers = movingMatched(inlierIndex,:);
+            fixedInliers = fixedMatched(inlierIndex,:);
+            usedSIFT = size(movingInliers,1) >= numPairsLarge;
+        end
+    catch ME
+        fprintf('SIFT недоступен для данного изображения: %s\n',ME.message);
+    end
+end
+
+if ~usedSIFT
+    % Выбор опорных точек в 10 пространственно разнесённых областях.
+    % Координаты на оригинале выбираются на основе локального контраста.
+    % Соответствия на distorted вычисляются по ИЗВЕСТНОМУ преобразованию,
+    % после чего добавляется воспроизводимая субпиксельная погрешность.
+    % Это отдельный учебный эксперимент, а не независимая регистрация.
+    fprintf(['РЕЖИМ: моделируемые контрольные точки (без SIFT).\n' ...
+        'Соответствия получены из заданной геометрии с ошибками локализации.\n' ...
+        'Оценка параметров демонстрационная, не независимая.\n\n']);
+
+    gray = im2double(original);
+    contrast = imfilter(gray,[-1 0 1]/2,'replicate').^2 + ...
+        imfilter(gray,[-1;0;1]/2,'replicate').^2;
+    [H,W] = size(original);
+    % Пять столбцов и две строки — пространственно разнесённые точки.
+    fixedInliers = zeros(numPairsLarge,2);
+    k = 0;
+    margin = max(8,round(min(H,W)*0.08));
+    for rr = 1:2
+        for cc = 1:5
+            k = k+1;
+            xCenter = margin+(cc-0.5)*(W-2*margin)/5;
+            yCenter = margin+(rr-0.5)*(H-2*margin)/2;
+            rad = max(4,round(min(H,W)*0.045));
+            x1=max(2,round(xCenter-rad)); x2=min(W-1,round(xCenter+rad));
+            y1=max(2,round(yCenter-rad)); y2=min(H-1,round(yCenter+rad));
+            block = contrast(y1:y2,x1:x2);
+            [~,ind] = max(block(:));
+            [iy,ix] = ind2sub(size(block),ind);
+            fixedInliers(k,:) = [x1+ix-1,y1+iy-1];
+        end
+    end
+
+    % Pixel-center mapping imresize: x_s=(x-0.5)*sx+0.5.
+    sx = size(scaled,2)/size(original,2);
+    sy = size(scaled,1)/size(original,1);
+    xs = (fixedInliers(:,1)-0.5)*sx+0.5;
+    ys = (fixedInliers(:,2)-0.5)*sy+0.5;
+    cIn = ([size(scaled,2),size(scaled,1)]+1)/2;
+    cOut = ([size(distorted,2),size(distorted,1)]+1)/2;
+    ct = cosd(theta); st = sind(theta);
+    movingInliers = [(xs-cIn(1))*ct+(ys-cIn(2))*st+cOut(1), ...
+                    -(xs-cIn(1))*st+(ys-cIn(2))*ct+cOut(2)];
+    % Смоделировать небольшие неточности постановки контрольных точек.
+    rng(6,'twister');
+    movingInliers = movingInliers + 0.35*randn(size(movingInliers));
+    fprintf('Создано %d моделируемых соответствий.\n',numPairsLarge);
+else
+    fprintf('РЕЖИМ: реальные совпадения SIFT.\n');
+    fprintf('Всего совпадений SIFT: %d; согласованных: %d.\n', ...
+        size(pairs,1),size(movingInliers,1));
+end
+
+% Для двух экспериментов используются вложенные наборы из 5 и 10 пар.
+% Упорядочение по максимальному минимальному расстоянию распределяет
+% отобранные точки по всему исходному изображению.
 xy = fixedInliers;
 selected = zeros(numPairsLarge,1);
 center = mean(xy,1);
@@ -93,13 +156,9 @@ for k = 2:numPairsLarge
     minDistSq(selected(1:k-1)) = -Inf;
     [~,selected(k)] = max(minDistSq);
 end
-
-fprintf('Всего совпадений SIFT: %d; геометрически согласованных: %d.\n', ...
-    size(pairs,1),size(movingInliers,1));
 fprintf('Контрольные точки: два набора, %d и %d пар.\n\n', ...
     numPairsSmall,numPairsLarge);
 
-% Координаты точек выводятся в консоль и попадут в PDF.
 fprintf('   № | moving x | moving y | fixed x | fixed y\n');
 fprintf('-----+----------+----------+---------+---------\n');
 for k = 1:numPairsLarge
@@ -111,10 +170,23 @@ end
 fprintf('\n');
 
 figure('Name','03 - Контрольные точки','Color','w');
-showMatchedFeatures(distorted,original, ...
-    movingInliers(selected,:),fixedInliers(selected,:), ...
-    'montage','PlotOptions',{'yo','go','y-'});
-title('10 пар контрольных точек (первые 5 используются в обоих опытах)');
+imshowpair(distorted,original,'montage');
+hold on;
+widthMoving = size(distorted,2);
+for k=1:numPairsLarge
+    j=selected(k);
+    p=movingInliers(j,:);
+    q=fixedInliers(j,:)+[widthMoving 0];
+    plot([p(1) q(1)],[p(2) q(2)],'y-','LineWidth',0.75);
+    plot(p(1),p(2),'yo','MarkerSize',6);
+    plot(q(1),q(2),'go','MarkerSize',6);
+end
+hold off;
+if usedSIFT
+    title('10 найденных пар контрольных точек SIFT');
+else
+    title('10 моделируемых пар контрольных точек (учебный режим)');
+end
 
 %% 4–7. Оценка подобия, обратное преобразование, восстановление
 Roriginal = imref2d(size(original));
