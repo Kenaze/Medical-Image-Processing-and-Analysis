@@ -1,202 +1,233 @@
 %% Лабораторная работа № 7
 % Коррекция перспективных искажений методом гомографии.
 % MATLAB R2024a + Image Processing Toolbox.
-% Скрипт предназначен для вызова make_report("lab7.m").
-% ВАЖНО: укажите реальное изображение своего варианта и его 4 угла ниже.
-% ginput не используется, так как make_report запускает скрипт без диалога.
+% Запуск отчёта: make_report("lab7.m")
+%
+% Подобранные ниже координаты соответствуют V07.jpg размером 599x333,
+% показанному в ранее сформированном lab7_report.pdf. Это приближённые
+% точки на границе ПЛОСКОСТИ ФАСАДА, а не на отдельном окне.
+% Если исходное изображение другое, необходимо указать его 4 угла вручную
+% В КОДЕ (ginput не используется, чтобы отчёт создавался автоматически).
 
 clc;
 clear;
 close all;
 
-%% 1. Входные данные и контрольные точки
-imageFile = 'Book1.jpg'; % ЗАМЕНИТЬ на имя файла своего варианта
+%% 1. Исходные данные и геометрия плоского объекта
+imageFile = 'V07.jpg';
 
-% ОБРАЗЕЦ из методички для Book1.jpg; для своего варианта ЗАМЕНИТЬ.
-% Последовательность: ЛВ -> ЛН -> ПН -> ПВ, координаты [x, y].
-movingPoints = [126 58; ...   % левый верхний
-                 21 222; ...  % левый нижний
-                 215 237; ... % правый нижний
-                 205 59];     % правый верхний
+% Порядок: ЛВ -> ЛН -> ПН -> ПВ, координаты MATLAB [x,y].
+% Область: фасад здания со всеми тремя окнами (внутри границ снимка).
+% Координаты уточнены по изображению из ранее созданного PDF, поэтому
+% при наличии оригинала их можно скорректировать на несколько пикселей.
+movingPoints = [ 33   8; ... % левый верхний угол области фасада
+                  6 327; ... % левый нижний
+                593 327; ... % правый нижний
+                534   8];    % правый верхний
 
 if ~isfile(imageFile)
-    error('lab7:FileNotFound', ['Не найден файл "%s". Поместите фотографию ' ...
-        'своего варианта рядом с lab7.m и задайте imageFile.'], imageFile);
+    error('lab7:FileNotFound', ...
+        'Не найден файл %s. Поместите V07.jpg рядом с lab7.m.', imageFile);
 end
-
 img = imread(imageFile);
-if ~(ndims(img) == 2 || (ndims(img) == 3 && size(img, 3) == 3))
-    error('lab7:InvalidImage', 'Требуется полутоновое или RGB-изображение.');
+if ~(ismatrix(img) || (ndims(img) == 3 && size(img,3) == 3))
+    error('lab7:InvalidImage', 'Допускается полутоновое или RGB-изображение.');
 end
-
 [imgHeight, imgWidth, ~] = size(img);
+
+% Координаты заданы для конкретного варианта, а не для любого изображения.
+if imgWidth ~= 599 || imgHeight ~= 333
+    error('lab7:WrongVariant', ['Размер %s: %dx%d, а точки определены ' ...
+        'для V07.jpg 599x333. Задайте movingPoints для своего снимка.'], ...
+        imageFile, imgWidth, imgHeight);
+end
 if ~isequal(size(movingPoints), [4 2]) || any(~isfinite(movingPoints(:)))
-    error('lab7:InvalidPoints', 'movingPoints должны содержать четыре пары [x, y].');
+    error('lab7:InvalidPoints', 'Необходимы четыре конечные пары [x,y].');
 end
 if any(movingPoints(:,1) < 1 | movingPoints(:,1) > imgWidth | ...
        movingPoints(:,2) < 1 | movingPoints(:,2) > imgHeight)
-    error('lab7:PointsOutOfBounds', ...
-        'Углы выходят за границы снимка %d x %d. Укажите углы своего варианта.', ...
-        imgWidth, imgHeight);
+    error('lab7:OutOfBounds', 'Контрольные точки выходят за пределы снимка.');
 end
 
-% Проверяем отсутствие вырожденной конфигурации (три коллинеарные точки).
-for a = 1:2
-    for b = a+1:3
-        for c = b+1:4
-            triangle = [movingPoints([a b c], :) ones(3,1)];
-            if abs(det(triangle)) < 1e-7 * max(imgWidth, imgHeight)^2
-                error('lab7:CollinearPoints', 'Три контрольные точки лежат на прямой.');
-            end
-        end
-    end
-end
-
-% Все последовательные углы должны образовывать один выпуклый четырехугольник.
-edges = diff([movingPoints; movingPoints(1,:)], 1, 1);
-crossZ = edges(:,1).*edges([2 3 4 1],2) - ...
-         edges(:,2).*edges([2 3 4 1],1);
+% Проверка выпуклости и отсутствия самопересечений.
+edgeVectors = diff([movingPoints; movingPoints(1,:)], 1, 1);
+crossZ = edgeVectors(:,1).*edgeVectors([2 3 4 1],2) - ...
+         edgeVectors(:,2).*edgeVectors([2 3 4 1],1);
 if ~(all(crossZ > 0) || all(crossZ < 0))
     error('lab7:PointOrder', ...
-        'Точки должны идти по контуру: ЛВ, ЛН, ПН, ПВ, без пересечений.');
+        'Точки должны обходить один выпуклый четырёхугольник: ЛВ-ЛН-ПН-ПВ.');
 end
 
+% ВАЖНО: не растягиваем объект принудительно до 599x333.
+% Размеры оцениваются по средним длинам противоположных сторон.
+upperWidth  = norm(movingPoints(4,:) - movingPoints(1,:));
+lowerWidth  = norm(movingPoints(3,:) - movingPoints(2,:));
+leftHeight  = norm(movingPoints(2,:) - movingPoints(1,:));
+rightHeight = norm(movingPoints(3,:) - movingPoints(4,:));
+outWidth    = max(2, round((upperWidth + lowerWidth)/2));
+outHeight   = max(2, round((leftHeight + rightHeight)/2));
+
+% Физические размеры фасада неизвестны; пропорции — приближённые.
+fixedPoints = [1        1; ...
+               1        outHeight; ...
+               outWidth outHeight; ...
+               outWidth 1];
+
 outDir = 'lab7_results';
-if ~exist(outDir, 'dir')
+if ~isfolder(outDir)
     mkdir(outDir);
 end
 
-fprintf('Лабораторная работа № 7: коррекция перспективных искажений\n');
-fprintf('Входной файл: %s\n', imageFile);
-fprintf('Размер исходного изображения: %d x %d пикселей\n', imgWidth, imgHeight);
-fprintf('Тип изображения: %s\n', class(img));
-fprintf('\nКонтрольные точки [x, y], порядок ЛВ - ЛН - ПН - ПВ:\n');
-disp(array2table(movingPoints, 'VariableNames', {'X', 'Y'}, ...
-    'RowNames', {'ЛВ', 'ЛН', 'ПН', 'ПВ'}));
-
-%% 2. Исходное изображение
-figure('Name', 'ЛР7 - исходное изображение', 'Color', 'w');
-imshow(img);
-title('Рисунок 1. Исходное изображение с перспективными искажениями');
-imwrite(img, fullfile(outDir, '01_original.png'));
-
-%% 3. Контрольные точки на исходном изображении
-figure('Name', 'ЛР7 - контрольные точки', 'Color', 'w');
-imshow(img);
-hold on;
-plot([movingPoints(:,1); movingPoints(1,1)], ...
-     [movingPoints(:,2); movingPoints(1,2)], ...
-     'y-', 'LineWidth', 2);
-plot(movingPoints(:,1), movingPoints(:,2), 'ro', ...
-     'MarkerSize', 10, 'LineWidth', 2, 'MarkerFaceColor', 'r');
+fprintf('Лабораторная работа № 7 — коррекция перспективных искажений\n');
+fprintf('Файл: %s; размер: %d x %d; класс: %s\n', ...
+    imageFile, imgWidth, imgHeight, class(img));
+fprintf('Объект: плоскость фасада со всеми тремя окнами.\n');
+fprintf('Контрольные точки [x,y]:\n');
+pointLabels = {'ЛВ','ЛН','ПН','ПВ'};
 for k = 1:4
-    text(movingPoints(k,1)+5, movingPoints(k,2)+5, num2str(k), ...
-         'Color', 'yellow', 'FontSize', 12, 'FontWeight', 'bold');
+    fprintf('  %d (%s): (%7.2f, %7.2f) -> (%4d, %4d)\n', ...
+        k, pointLabels{k}, movingPoints(k,1), movingPoints(k,2), ...
+        fixedPoints(k,1), fixedPoints(k,2));
+end
+fprintf('Длины верх/низ: %.1f / %.1f пикс.; лево/право: %.1f / %.1f пикс.\n', ...
+    upperWidth, lowerWidth, leftHeight, rightHeight);
+fprintf('Расчётный размер результата: %d x %d пикселей.\n', ...
+    outWidth, outHeight);
+fprintf('Примечание: метрические размеры объекта не заданы, масштаб условен.\n');
+
+%% 2. Исходная фотография
+figure('Name','ЛР7 | Исходное изображение','Color','w', ...
+    'Position',[80 80 1000 650]);
+imshow(img, 'InitialMagnification','fit');
+title('Рисунок 1. Исходный фасад с перспективными искажениями', ...
+    'Interpreter','none');
+imwrite(img, fullfile(outDir,'01_original.png'));
+
+%% 3. Контрольные точки на единой плоскости фасада
+figure('Name','ЛР7 | Углы фасада','Color','w', ...
+    'Position',[100 100 1000 650]);
+imshow(img, 'InitialMagnification','fit');
+hold on;
+outline = [movingPoints; movingPoints(1,:)];
+plot(outline(:,1), outline(:,2), 'y-', 'LineWidth', 2.5);
+plot(movingPoints(:,1), movingPoints(:,2), 'ro', ...
+     'MarkerFaceColor','r','MarkerSize',9,'LineWidth',1.5);
+for k = 1:4
+    text(movingPoints(k,1) + 8, movingPoints(k,2), num2str(k), ...
+        'Color','yellow','FontSize',13,'FontWeight','bold', ...
+        'BackgroundColor',[0.1 0.1 0.1], 'Margin',2);
 end
 hold off;
-title('Рисунок 2. Контрольные точки: 1-ЛВ, 2-ЛН, 3-ПН, 4-ПВ');
-exportgraphics(gcf, fullfile(outDir, '02_control_points.png'), 'Resolution', 200);
+title('Рисунок 2. Четыре угла плоскости фасада (ЛВ, ЛН, ПН, ПВ)', ...
+    'Interpreter','none');
+exportgraphics(gcf,fullfile(outDir,'02_control_points.png'), ...
+    'Resolution',200);
 
-%% 4. Целевые точки и матрица гомографии
-% В соответствии с методичкой объект выпрямляется на весь размер кадра.
-% Начало системы пиксельных координат MATLAB: (1,1).
-fixedPoints = [1        1; ...
-               1        imgHeight; ...
-               imgWidth imgHeight; ...
-               imgWidth 1];
-
-fprintf('\nЦелевые точки [x, y]:\n');
-disp(array2table(fixedPoints, 'VariableNames', {'X', 'Y'}, ...
-    'RowNames', {'ЛВ', 'ЛН', 'ПН', 'ПВ'}));
-
-% Сохраняем fitgeotrans, прямо указанную в методическом задании.
+%% 4. Гомография по четырём соответствиям
 TFORM = fitgeotrans(movingPoints, fixedPoints, 'projective');
 
-% Объект projective2d хранит матрицу для умножения СТРОКИ [x y 1]*T.
-% Для принятой в методичке записи СТОЛБЦА [x';y';1]~H*[x;y;1]:
+% MATLAB projective2d использует строчные векторы: [x y 1]*TFORM.T.
+% H ниже рассчитана для столбцов: [x';y';1] ~ H*[x;y;1].
 H = TFORM.T.';
-H = H ./ H(3,3);
-
-fprintf('\nМатрица гомографии H (для векторов-столбцов):\n');
+if abs(H(3,3)) > 1e-12
+    H = H/H(3,3);
+end
+if abs(det(H)) < 1e-12
+    error('lab7:SingularHomography','Матрица гомографии вырождена.');
+end
+fprintf('\nМатрица H (столбцовая запись):\n');
 disp(H);
-fprintf('Определитель H: %.9g\n', det(H));
+fprintf('det(H) = %.9g\n',det(H));
 
-%% 5. Преобразование изображения
-% imref2d(sz) точно связывает центры пикселей с координатами 1..W и 1..H.
-R = imref2d([imgHeight imgWidth]);
-imgTransformed = imwarp(img, TFORM, 'linear', 'OutputView', R, ...
-    'FillValues', 0);
+%% 5. Исправленное изображение (без принудительного растяжения)
+R = imref2d([outHeight outWidth]);
+imgTransformed = imwarp(img, TFORM, 'linear', ...
+    'OutputView',R, 'FillValues',0);
 
-% Независимая маска полезной части: ноль на недостающих пикселях.
-validMask = imwarp(true(imgHeight, imgWidth), TFORM, 'nearest', ...
-    'OutputView', R);
+% Независимая бинарная маска покрытия выходного прямоугольника.
+% nearest не интерполирует значения 0 и 1.
+validMask = imwarp(true(imgHeight,imgWidth), TFORM, 'nearest', ...
+    'OutputView',R);
+validFraction = nnz(validMask)/numel(validMask);
 
-figure('Name', 'ЛР7 - исправленное изображение', 'Color', 'w');
-imshow(imgTransformed);
-title('Рисунок 3. Изображение после коррекции перспективы');
-imwrite(imgTransformed, fullfile(outDir, '03_corrected.png'));
+figure('Name','ЛР7 | Результат коррекции','Color','w', ...
+    'Position',[120 120 1000 650]);
+imshow(imgTransformed, 'InitialMagnification','fit');
+title(sprintf('Рисунок 3. Фасад после коррекции (%d x %d)', ...
+    outWidth,outHeight), 'Interpreter','none');
+imwrite(imgTransformed,fullfile(outDir,'03_corrected.png'));
 
-figure('Name', 'ЛР7 - сравнение', 'Color', 'w', ...
-    'Position', [100 100 1100 520]);
-tiledlayout(1, 2, 'Padding', 'compact', 'TileSpacing', 'compact');
+%% 6. Сравнение исходного и исправленного фасада
+figure('Name','ЛР7 | Сравнение','Color','w', ...
+    'Position',[120 90 1280 620]);
+tiledlayout(1,2,'Padding','compact','TileSpacing','compact');
 nexttile;
-imshow(img);
-title('До коррекции');
+imshow(img, 'InitialMagnification','fit');
+hold on;
+plot(outline(:,1),outline(:,2),'y-','LineWidth',2);
+hold off;
+title('До: исходный фасад и граница области');
 nexttile;
-imshow(imgTransformed);
-title('После коррекции');
-sgtitle('Рисунок 4. Сравнение исходного и исправленного изображения');
+imshow(imgTransformed,'InitialMagnification','fit');
+title('После: выпрямленная плоскость фасада');
+sgtitle('Рисунок 4. Сравнение геометрии до и после коррекции', ...
+    'Interpreter','none');
 
-figure('Name', 'ЛР7 - маска валидных пикселей', 'Color', 'w');
-imshow(validMask);
-title('Рисунок 5. Маска пикселей, для которых известен исходный цвет');
-imwrite(validMask, fullfile(outDir, '04_valid_mask.png'));
+%% 7. Маска валидных пикселей без дефекта экспорта однородного изображения
+% Цветовая маска помогает видеть покрытие и не схлопывается до узкой полосы.
+maskRGB = zeros(outHeight,outWidth,3,'uint8');
+maskRGB(:,:,1) = uint8(~validMask)*220 + uint8(validMask)*45;
+maskRGB(:,:,2) = uint8(~validMask)*55  + uint8(validMask)*185;
+maskRGB(:,:,3) = uint8(~validMask)*55  + uint8(validMask)*90;
+figure('Name','ЛР7 | Покрытие выходного кадра','Color','w', ...
+    'Position',[140 100 1000 610]);
+imshow(maskRGB,'InitialMagnification','fit');
+axis on;
+xlabel('X, пиксели');
+ylabel('Y, пиксели');
+title(sprintf(['Рисунок 5. Маска покрытия: зелёный — исходные данные, ' ...
+    'красный — пустые области (%.2f%%)'],100*(1-validFraction)), ...
+    'Interpreter','none');
+imwrite(maskRGB,fullfile(outDir,'04_valid_mask_visualization.png'));
+imwrite(validMask,fullfile(outDir,'05_valid_mask_binary.png'));
 
-%% 6. Численная оценка качества
-% Репроекционная ошибка измеряется именно в четырёх заданных точках.
-[xCheck, yCheck] = transformPointsForward(TFORM, ...
-    movingPoints(:,1), movingPoints(:,2));
+%% 8. Контрольная проверка математической точности
+% У четырёх пар точек RMSE практически нулевой по построению; это НЕ
+% независимая проверка геометрической правильности и резкости результата.
+[xCheck,yCheck] = transformPointsForward(TFORM, ...
+    movingPoints(:,1),movingPoints(:,2));
 reprojected = [xCheck yCheck];
-pointErrors = vecnorm(reprojected - fixedPoints, 2, 2);
-rmsePoints = sqrt(mean(pointErrors.^2));
-maxPointError = max(pointErrors);
-validFraction = nnz(validMask) / numel(validMask);
+errors = sqrt(sum((reprojected-fixedPoints).^2,2));
+rmsePoints = sqrt(mean(errors.^2));
+maxPointError = max(errors);
 
-fprintf('\nОшибки отображения четырёх контрольных точек (пиксели):\n');
-disp(table((1:4).', pointErrors, ...
-    'VariableNames', {'PointNumber', 'ErrorPixels'}));
-fprintf('RMSE по контрольным точкам: %.9f пикселя\n', rmsePoints);
-fprintf('Максимальная ошибка: %.9f пикселя\n', maxPointError);
-fprintf('Доля пикселей с известными данными в выходном кадре: %.2f %%\n', ...
-    100*validFraction);
-fprintf('Доля незаполненных пикселей: %.2f %%\n', ...
-    100*(1-validFraction));
+fprintf('\nОшибки отображения четырёх опорных точек:\n');
+for k = 1:4
+    fprintf('  Точка %d: %.5e пикс.\n',k,errors(k));
+end
+fprintf('RMSE (только опорные точки) = %.5e пикс.\n',rmsePoints);
+fprintf('Максимальная ошибка = %.5e пикс.\n',maxPointError);
+fprintf('Покрытие выходного изображения = %.2f%%\n',100*validFraction);
+fprintf('Незаполненные пиксели = %.2f%%\n',100*(1-validFraction));
+fprintf('Отношение ширины к высоте после коррекции = %.4f\n', ...
+    outWidth/outHeight);
 
-% Инверсная гомография: в общем случае не является поворотом + масштабом.
+% У projective2d нет единого глобального угла поворота и масштаба.
 tformInv = invert(TFORM);
-fprintf('\nОбратная матрица преобразования (строчная форма MATLAB):\n');
+fprintf('\nОбратная матрица преобразования (форма MATLAB):\n');
 disp(tformInv.T);
-fprintf(['Scale и RotationAngle не являются глобальными параметрами ' ...
-    'общего projective2d.\n']);
-fprintf(['Исходные scaleFactor и theta не заданы методичкой как ' ...
-    'параметры этой фотографии.\n']);
-fprintf(['Поэтому сравнение Scale/RotationAngle со scaleFactor/theta ' ...
-    'для данной гомографии не проводится.\n']);
+fprintf(['Scale и RotationAngle не являются свойствами общей projective2d; ' ...
+    'исходные scaleFactor и theta для фотографии не предоставлены.\n']);
 
 fprintf('\nЗАКЛЮЧЕНИЕ\n');
-fprintf(['Четыре угла объекта сопоставлены с углами прямоугольника; ' ...
-    'по ним вычислена гомография.\n']);
-fprintf(['RMSE в контрольных точках = %.6g пикселя; ' ...
-    'доля незаполненных пикселей = %.2f %%.\n'], ...
-    rmsePoints, 100*(1-validFraction));
-fprintf(['Малая ошибка в четырех опорных точках не доказывает ' ...
-    'сохранность деталей и отсутствие ошибок вне этих точек.\n']);
-fprintf(['Проверка геометрии объекта и качества интерполяции ' ...
-    'дополнительно выполняется по рисункам 3-5.\n']);
-fprintf('Результаты сохранены в папке: %s\n', fullfile(pwd,outDir));
+fprintf(['Выпрямлена одна плоскость фасада, охватывающая три окна. ' ...
+    'Целевой размер получен из геометрии четырёхугольника.\n']);
+fprintf(['Проверка: RMSE = %.3e пикс. по четырём использованным точкам; ' ...
+    'покрытие = %.2f%%.\n'],rmsePoints,100*validFraction);
+fprintf(['Практическое качество следует оценивать визуально: ' ...
+    'прямолинейность рам, пропорции окон, отсутствие срезанных областей.\n']);
+fprintf(['Без независимых геометрических ориентиров и эталона ' ...
+    'метрическую точность подтвердить нельзя.\n']);
+fprintf('Результаты: %s\n',fullfile(pwd,outDir));
 
-%% 7. Переменные рабочей области
-fprintf('\nПеременные MATLAB:\n');
-whos
-
-% В конце НЕ вызывать close all: make_report собирает открытые Figure.
+% В конце НЕТ close all: открытые Figure забирает make_report.m.
