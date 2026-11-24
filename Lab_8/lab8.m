@@ -66,9 +66,15 @@ title('До регистрации: зелёные и пурпурные обл�
 
 figure('Name','04. Согласование гистограмм','Color','w','Position',[100 100 1050 430]);
 tiledlayout(1,3,'Padding','compact','TileSpacing','compact');
-nexttile; imhist(fixed); title('Гистограмма fixed');
-nexttile; imhist(moving); title('Гистограмма moving');
-nexttile; imhist(movingMatched); title('После imhistmatch');
+histImages = {fixed,moving,movingMatched};
+histTitles = {'Гистограмма fixed','Гистограмма moving','После imhistmatch'};
+for h = 1:3
+    ax = nexttile;
+    [counts,bins] = imhist(histImages{h});
+    bar(ax,bins,counts,1);
+    title(ax,histTitles{h}); xlabel(ax,'Яркость');
+    ylabel(ax,'Количество пикселей'); xlim(ax,[0 1]);
+end
 
 %% 3. Контрольные метрики на одинаковой области и шкале [0,1]
 % MSE -> минимум; NCC -> максимум. Не заменяют анатомическую оценку.
@@ -90,6 +96,9 @@ nccOut = zeros(nTests,1);
 meanDisplacement = zeros(nTests,1);
 maxDisplacement = zeros(nTests,1);
 elapsedSeconds = zeros(nTests,1);
+minJacobian = zeros(nTests,1);
+foldPercent = zeros(nTests,1);
+rmseOut = zeros(nTests,1);
 fields = cell(nTests,1);
 registeredGrays = cell(nTests,1);
 
@@ -112,6 +121,12 @@ for s = 1:numel(smoothValues)
         nccOut(k) = corr2(fixed,reg);
         meanDisplacement(k) = mean(fieldMagnitude(:));
         maxDisplacement(k) = max(fieldMagnitude(:));
+        rmseOut(k) = sqrt(mseOut(k));
+        Jtest = deformationJacobian(D);
+        minJacobian(k) = min(Jtest(:));
+        foldPercent(k) = 100*nnz(Jtest <= 0)/numel(Jtest);
+        fprintf('  RMSE=%.6f; min(J)=%.6f; J<=0: %.4f%%\n', ...
+            rmseOut(k),minJacobian(k),foldPercent(k));
         fields{k} = D;
         registeredGrays{k} = reg;
         fprintf('  MSE=%.6f; NCC=%.6f; mean|D|=%.3f px; max|D|=%.3f px; %.1f s\n', ...
@@ -120,20 +135,45 @@ for s = 1:numel(smoothValues)
 end
 
 T = table(caseNumber,sigmaOut,iterationLabel,mseOut,nccOut, ...
-    meanDisplacement,maxDisplacement,elapsedSeconds, ...
+    meanDisplacement,maxDisplacement,elapsedSeconds,rmseOut,minJacobian,foldPercent, ...
     'VariableNames',{'Case','Smoothing','Iterations','MSE','NCC', ...
-    'MeanDisp_px','MaxDisp_px','Time_s'});
+    'MeanDisp_px','MaxDisp_px','Time_s','RMSE','MinJ','NonpositiveJ_pct'});
 disp(' ');
 disp('Сводная таблица экспериментов:');
-disp(T);
+% Компактный текстовый вывод без HTML-заголовков таблицы MATLAB Online.
+fprintf('%3s %5s %13s %9s %9s %8s %9s %9s %9s %8s\n', ...
+    'No','Sigma','Iterations','MSE','NCC','MeanD','MaxD','MinJ','J<=0 %','Time(s)');
+for k = 1:nTests
+    fprintf('%3d %5.1f %13s %9.6f %9.6f %8.3f %9.3f %9.3f %9.4f %8.2f\n', ...
+        k,sigmaOut(k),char(iterationLabel(k)),mseOut(k),nccOut(k), ...
+        meanDisplacement(k),maxDisplacement(k),minJacobian(k), ...
+        foldPercent(k),elapsedSeconds(k));
+end
 writetable(T,fullfile(outputDir,'registration_metrics.csv'));
 
 % Автоматический выбор по минимальной MSE при фиксированной шкале яркости.
 % Этот критерий не гарантирует отсутствия нереалистичных деформаций.
 [~,bestIdx] = min(mseOut);
+% Сохраняем выбор по MSE для сравнимости с исходным заданием.
+% Отдельно предлагаем минимум MSE среди полей без J<=0 на дискретной сетке.
+validIdx = find(foldPercent == 0 & isfinite(minJacobian));
+if isempty(validIdx)
+    fprintf('Нет эксперимента без J<=0 на дискретной сетке.\n');
+    bestNoFoldIdx = NaN;
+else
+    [~,ii] = min(mseOut(validIdx));
+    bestNoFoldIdx = validIdx(ii);
+    fprintf('Минимум MSE среди полей без J<=0: эксперимент %d.\n',bestNoFoldIdx);
+end
 D = fields{bestIdx};
 movingReg = registeredGrays{bestIdx};
 mag = hypot(D(:,:,1),D(:,:,2));
+J = deformationJacobian(D);
+foldingMask = J <= 0;
+fprintf('RMSE до обработки: %.6f; после imhistmatch: %.6f\n', ...
+    sqrt(mseInitial),sqrt(mseMatched));
+fprintf('Выбранное поле: min(J)=%.6f; max(J)=%.6f; mean(J)=%.6f; J<=0: %.4f%%\n', ...
+    min(J(:)),max(J(:)),mean(J(:)),foldPercent(bestIdx));
 fprintf('\nВыбран эксперимент %d: smoothing=%.1f; iterations=[%s]\n', ...
     bestIdx,sigmaOut(bestIdx),char(iterationLabel(bestIdx)));
 fprintf('MSE: %.6f -> %.6f (относительное изменение %.2f%%)\n', ...
@@ -147,9 +187,15 @@ if ~isequal(size(movingRegRGB),size(fixedRGB))
     error('Lab8:WarpSize','Результат imwarp не совпадает по размеру с опорным кадром.');
 end
 
+registeredGrayRGB = im2single(im2gray(movingRegRGB));
+mseRGB = mean((fixed(:)-registeredGrayRGB(:)).^2);
+nccRGB = corr2(fixed,registeredGrayRGB);
+fprintf('Итоговый RGB по яркости (без imhistmatch): MSE=%.6f; NCC=%.6f; RMSE=%.6f\n', ...
+    mseRGB,nccRGB,sqrt(mseRGB));
+
 figure('Name','05. Результат: наложение','Color','w','Position',[100 100 950 650]);
 imshowpair(fixed,movingReg);
-title(sprintf('Demons: наложение после регистрации (\sigma = %.1f)',sigmaOut(bestIdx)));
+title(sprintf('Demons: наложение после регистрации (σ = %.1f)',sigmaOut(bestIdx)));
 
 figure('Name','06. Результат: рядом','Color','w','Position',[100 100 1100 470]);
 imshowpair(fixed,movingReg,'montage');
@@ -190,18 +236,46 @@ bar(caseNumber,nccOut); hold on; yline(nccMatched,'--','До Demons'); hold off;
 title('NCC: больше — лучше'); xlabel('Номер эксперимента'); ylabel('NCC');
 xticks(caseNumber);
 
-%% 8. Сохранение результатов (независимо от PDF-отчёта)
+%% 8. Контроль геометрии
+figure('Name','11. Определитель Якоби','Color','w');
+imagesc(J); axis image ij; colorbar; colormap(gca,'turbo');
+title('Определитель Якоби преобразования x + D(x)');
+xlabel('X, пиксели'); ylabel('Y, пиксели');
+
+figure('Name','12. Области неположительного Якоби','Color','w');
+imshow(foldingMask);
+title(sprintf('Области J ≤ 0: %.4f%%',foldPercent(bestIdx)));
+
+figure('Name','13. Сравнение геометрии экспериментов','Color','w');
+tiledlayout(1,2,'Padding','compact','TileSpacing','compact');
+nexttile; bar(caseNumber,foldPercent); xticks(caseNumber);
+title('Доля пикселей J ≤ 0'); xlabel('Эксперимент'); ylabel('Доля, %');
+nexttile; bar(caseNumber,minJacobian); yline(0,'--'); xticks(caseNumber);
+title('Минимум J'); xlabel('Эксперимент'); ylabel('min(J)');
+
+%% 9. Сохранение результатов (независимо от PDF-отчёта)
 imwrite(fixedRGB,fullfile(outputDir,'fixed_used.png'));
 imwrite(movingRGB,fullfile(outputDir,'moving_used.png'));
 imwrite(movingRegRGB,fullfile(outputDir,'moving_registered_rgb.png'));
 imwrite(movingReg,fullfile(outputDir,'moving_registered_gray.png'));
 save(fullfile(outputDir,'displacement_field.mat'),'D','T','bestIdx', ...
-    'smoothValues','iterationSets');
+    'smoothValues','iterationSets','J','foldingMask','bestNoFoldIdx', ...
+    'mseRGB','nccRGB');
+imwrite(foldingMask,fullfile(outputDir,'nonpositive_jacobian.png'));
 fprintf('\nФайлы результатов сохранены в папке: %s\n',fullfile(pwd,outputDir));
 fprintf(['Вывод: для объективного сравнения учитывайте MSE, NCC, ' ...
     'величину смещений и отсутствие визуальных складок/разрывов.\n']);
 fprintf(['Слабое сглаживание допускает более локальные деформации, ' ...
     'сильное — делает поле более гладким, но может недосовместить детали.\n']);
-fprintf('Перед выводами проверьте рисунки 05–09: автоматический минимум MSE не всегда идеален.\n');
+fprintf('Перед выводами проверьте рисунки 05–09 и 11–13: автоматический минимум MSE не всегда идеален.\n');
 
 % ВАЖНО: не закрывать Figure — make_report.m сам соберёт их в PDF.
+
+
+function J = deformationJacobian(D)
+% D задаёт координаты выборки moving в сетке fixed: x + D(x).
+% gradient: первый выход по столбцам (x), второй по строкам (y).
+[ux,uy] = gradient(double(D(:,:,1)));
+[vx,vy] = gradient(double(D(:,:,2)));
+J = (1+ux).*(1+vy)-uy.*vx;
+end

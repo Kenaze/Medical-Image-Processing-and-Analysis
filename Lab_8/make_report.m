@@ -25,7 +25,7 @@ function pdfPath = make_report(scriptFile, varargin)
 % The console section always uses A4 landscape pages.
 %
 % Backend: auto (default), dom, native. Native requires only MATLAB.
-% Version 2.0. Target: R2026b Update 2 / MATLAB Online Basic.
+% Version 2.1. Target: R2026b Update 2 / MATLAB Online Basic.
 % R2024b compatibility path uses print for console pages.
 %
 % Examples:
@@ -275,10 +275,30 @@ function consoleText = runAndCapture(scriptPath)
 
     % evalc captures Command Window output produced by evalin/run.
     consoleText = evalc("evalin('base', wrappedCommand);");
+    consoleText = cleanConsoleMarkup(consoleText);
 end
 
 
 %% ========================================================================
+function txt = cleanConsoleMarkup(txt)
+% Remove MATLAB Online formatting, preserving warning messages and labels.
+% Restrict hyperlink removal to MATLAB command links and formatting tags.
+pattern = '(?i)<a\b[^>]*\bhref\s*=\s*["'']matlab:[^>]*>([\s\S]*?)</a\s*>';
+txt = regexprep(txt,pattern,'$1');
+% Only strip paired formatting tags, not arbitrary angle-bracket text.
+txt = regexprep(txt,'(?i)<(strong|b|span|em|i|u)\b[^>]*>([\s\S]*?)</\1\s*>','$2');
+% Repeat for nested formatting.
+txt = regexprep(txt,'(?i)<(strong|b|span|em|i|u)\b[^>]*>([\s\S]*?)</\1\s*>','$2');
+txt = regexprep(txt,'(?i)<br\s*/?>',newline);
+txt = strrep(txt,'&nbsp;',' ');
+txt = strrep(txt,'&lt;','<');
+txt = strrep(txt,'&gt;','>');
+txt = strrep(txt,'&quot;','"');
+txt = strrep(txt,'&#39;',char(39));
+txt = strrep(txt,'&apos;',char(39));
+txt = strrep(txt,'&amp;','&');
+end
+
 function figs = sortFigures(figs)
 % Sort standard figures by figure number where possible.
 % If Number is unavailable, reverse FINDALL order as a reasonable
